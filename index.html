@@ -1,0 +1,671 @@
+<!-- Standalone basic maze using HTML Canvas-->
+
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8"/>
+    <title>maze maze</title>
+    <script type="text/javascript">
+
+      // let rows = getUrlParameter("rows");
+      // console.log(rows);
+
+      const TILE_SIZE = 20;
+      const TOP_MARGIN = 2 * TILE_SIZE;
+      const LEFT_MARGIN = TILE_SIZE;
+      // In recursive version:
+      // 192x100 dies (stack overflow)
+      // 191x100 ok
+      // so max is about 19,000 cells
+      // Non-recursive:
+      // 2500x2500 runs fine, takes about 12 sec
+      // max is > 6,250,000 cells
+      // (on my machine)
+      const MAZE_ROWS = 6;
+      const MAZE_COLS = 6;
+      let randomSeed = window.performance.now();
+      let start = [Math.floor(cheesyRandom()*MAZE_COLS), 0];
+      let finish = [Math.floor(cheesyRandom()*MAZE_COLS), MAZE_ROWS-1];
+      let finishIndex = -1;
+
+      // We will have patterns in the "flow"
+      let pattern = "random";
+      // let pattern = "checkered";
+      // let pattern = "zigzag";
+
+      let checkerSize = 15;
+      let checkerPercent = 0.95;
+
+      let zigzagSize = 10;
+      let zigzagPercent = 0.95;
+
+      // maze indexed [col,row] or [x,y]
+      // top left cell is [0,0]
+
+      // initially all walls are filled in
+      var horizWalls = new Array(MAZE_COLS);
+      for (var i = 0; i < horizWalls.length; i++) {
+        horizWalls[i] = new Array(MAZE_ROWS+1);
+        for (var j = 0; j < MAZE_ROWS+1; j++) {
+          horizWalls[i][j] = true;
+        }
+      }
+      var vertWalls = new Array(MAZE_COLS+1);
+      for (var i = 0; i < vertWalls.length; i++) {
+        vertWalls[i] = new Array(MAZE_ROWS);
+        for (var j = 0; j < MAZE_ROWS; j++) {
+          vertWalls[i][j] = true;
+        }
+      }
+
+      let mazeTree = new Array();
+//      console.log("init, mt len: " + mazeTree.length);
+      let mazeTreeCells = 0;
+
+      // Statuses we keep for cells as we "dig" out path through maze
+      const UNVISITED = 1;  // haven't been here yet
+      const VISITED = 2;    // been here, but haven't tried all directions
+      const DONE = 3;       // have looked in all directions
+      var cellStatus = new Array(MAZE_COLS);
+      for (var col = 0; col < cellStatus.length; col++) {
+        cellStatus[col] = new Array(MAZE_ROWS);
+        for (var row = 0; row < MAZE_ROWS; row++) {
+          cellStatus[col][row] = UNVISITED;
+        }
+      }
+
+
+      // make maze more interesting by removing/adding blocks of cells
+      function markBlocks(numBlocks, blockSize, status) {
+        for (let i=0; i<numBlocks; i+=1) {
+          let blockHeight = 1+Math.floor(Math.random() * (blockSize-1));
+          let blockWidth = 1+Math.floor(Math.random() * (blockSize-1));
+          let blockFirstCol = Math.floor(Math.random()*MAZE_COLS - blockWidth/2);
+          let blockFirstRow = Math.floor(Math.random()*MAZE_ROWS - blockHeight/2);
+          for (let c=blockFirstCol; c<blockFirstCol+blockWidth; c+=1) {
+            for (let r=blockFirstRow; r<blockFirstRow+blockHeight; r+=1) {
+              // only remove/add within maze boundary
+              if (c>=0 && c < MAZE_COLS && r>=0 && r<MAZE_ROWS){
+                cellStatus[c][r] = status;
+              }
+            }
+          }
+        }
+      }
+
+      // do clean-up before digging maze -- get any "dead" walls
+      // (walls between 2 "DONE" cells or between DONE and out-of-bounds)
+      function removeWalls() {
+        for (let c=0; c<MAZE_COLS; c+=1) {
+          for (let r=0; r<MAZE_ROWS; r+=1) {
+            // if I am marked DONE, then erase walls to any DONE nbrs
+            if (cellStatus[c][r] == DONE) {
+              // console.log("testing at: " + c + "," + r );
+              if (c-1 < 0) {
+                removeLeftWall(c, r);
+              } else if (cellStatus[c-1][r] == DONE) {
+                removeLeftWall(c, r);
+              }
+
+              if (r-1 < 0) {
+                removeTopWall(c, r);
+              } else if (cellStatus[c][r-1] == DONE) {
+                removeTopWall(c, r);
+              } 
+
+              if (r+1 == MAZE_ROWS) {
+                removeBottomWall(c, r);
+              } else if (cellStatus[c][r+1] == DONE) {
+                removeBottomWall(c, r);
+              }
+
+              if (c+1 == MAZE_COLS) {
+                removeRightWall(c, r);
+              } else if (cellStatus[c+1][r] == DONE) {
+                removeRightWall(c, r);
+              }
+            }
+          }
+        }
+      }
+
+
+      function getDigOrder(col, row) {
+        if (pattern == "random") {
+          // randomly ordered
+          let directions = ['U', 'D', 'L', 'R'];
+          for (let i=0; i<3; i++) {
+            let dir = directions[i];
+            let j = randomBetween(i,3);
+            directions[i] = directions[j];
+            directions[j] = dir;       
+            return directions;  
+          } 
+        } else if (pattern == "checkered") {
+          // do a "checkered" pattern
+          // prefer U/D or L/R in different regions
+          let directions = ['U', 'D', 'L', 'R'];  // dummy vals for initialization
+          let UD = (Math.random() > checkerPercent);
+          if ((Math.floor(col/checkerSize) % 2)==(Math.floor(row/checkerSize) % 2)) {
+            // prefer U/D in this checkered square
+            UD = (Math.random() < checkerPercent);
+          }
+          if (!UD) {
+            // Swap U,D for L, R
+            directions = ['L', 'R', 'U', 'D'];
+          }
+          // now randomly choose L vs R, U vs D by swapping
+          if (Math.random() < 0.5) {
+            let temp = directions[0];
+            directions[0] = directions[1];
+            directions[1] = temp;
+          }
+          if (Math.random() < 0.5) {
+            let temp = directions[2];
+            directions[2] = directions[3];
+            directions[3] = temp;
+          }
+          return directions;
+        } else if (pattern == "zigzag") {
+          // do a "zigzag" pattern
+          // prefer U/D or L/R in different diagonal stripes
+          let directions = ['U', 'D', 'L', 'R'];  // dummy vals for initialization
+          let UD = (Math.random() > zigzagPercent);
+          if ((Math.floor((col+row)/(2*zigzagSize)) % 2) == 0) {
+            // prefer U/D in this diagonal stripe
+            UD = (Math.random() < zigzagPercent);
+          }
+          if (!UD) {
+            // Swap U,D for L, R
+            directions = ['L', 'R', 'U', 'D'];
+          }
+          // now randomly choose L vs R, U vs D by swapping
+          if (Math.random() < 0.5) {
+            let temp = directions[0];
+            directions[0] = directions[1];
+            directions[1] = temp;
+          }
+          if (Math.random() < 0.5) {
+            let temp = directions[2];
+            directions[2] = directions[3];
+            directions[3] = temp;
+          }
+          return directions;
+        }
+      }
+
+      function printMazeTree() {
+        console.log("-------------------------------");
+        for (let i=0; i<mazeTree.length; i++) {
+          //console.log("mt[" + i + "]" + mazeTree[i]);
+          console.log(mazeTree[i]);
+        }
+      }
+
+      // starting at (col, row),
+      // "dig" through the grid, creating mazeTree[] through cells
+      function digMaze(col, row) {
+        //console.log("digging at : " + col + ", " + row);
+        let depth = 0;
+        let numCellsDone = 0;
+        let numCellsDug = 0;
+        let currentCell = 0;  // index into mazeTree[]
+        mazeTree.push({'col': col, 'row': row, 'parent': -1, 'digOrder': getDigOrder(col, row), 'digs': 0, 'depth':depth});
+        cellStatus[col][row] = VISITED;
+        numCellsDug = 1;
+
+        // each time through the loop:
+        // we pick an already-VISITED (but not DONE) cell and dig in a new direction
+        // if no direction is available, then mark DONE
+        // end-of-loop invariants
+        //   mazeTree[] up-to-date and consistent
+        //   if cell is DONE, so are all children, out to leaves
+        while (numCellsDone < MAZE_ROWS*MAZE_COLS) {
+          //console.log("cc: " + currentCell + " mazetree len: " + mazeTree.length);
+          //console.log("cellsDone: " + numCellsDone + ", cells dug: " + numCellsDug);
+          //printMazeTree();
+
+          if (finish[0] == mazeTree[currentCell].col && finish[1] == mazeTree[currentCell].row) {
+            finishIndex = currentCell;
+            console.log('Found finish at ', finish[0], finish[1], 'finishIndex', finishIndex);
+          }
+          let digs = mazeTree[currentCell].digs;
+          let digOrder = mazeTree[currentCell].digOrder;
+          let dir = digOrder[digs];
+          let depth = mazeTree[currentCell].depth;
+          //console.log("cur: " + currentCell + ", dir: " + dir + ", digs: " + digs + ", depth: " + depth);
+          // get a direction, see if we can dig
+          if (dir == 'U') {
+            col = mazeTree[currentCell].col;  //
+            row = mazeTree[currentCell].row;  //
+            //console.log("Testing U from: (" + col + "," + row + ")");
+            mazeTree[currentCell].digs += 1;
+            let digCol = col;
+            let digRow = row-1;
+            if (digRow >= 0 && cellStatus[digCol][digRow] == UNVISITED) {
+              removeTopWall(col, row);
+              //console.log("Digging U to: (" + digCol + "," + digRow + ")");
+              mazeTree.push({'col': digCol, 'row': digRow, 'parent': currentCell, 'digs': 0, 'digOrder': getDigOrder(col, row), 'depth': depth+1});
+              cellStatus[digCol][digRow] = VISITED;
+              numCellsDug += 1;
+              currentCell = mazeTree.length-1;
+            }
+          } else if (dir == 'D') {
+            col = mazeTree[currentCell].col;  //
+            row = mazeTree[currentCell].row;  //
+            //console.log("Testing D from: (" + col + "," + row + ")");
+            mazeTree[currentCell].digs += 1;
+            let digCol = col;
+            let digRow = row+1;
+            if (digRow < MAZE_ROWS && cellStatus[digCol][digRow] == UNVISITED) {
+              removeBottomWall(col, row);
+              //console.log("Digging D to: (" + digCol + "," + digRow + ")");
+              mazeTree.push({'col': digCol, 'row': digRow, 'parent': currentCell, 'digs': 0, 'digOrder': getDigOrder(col, row), 'depth': depth+1});
+              cellStatus[digCol][digRow] = VISITED;
+              numCellsDug += 1;
+              currentCell = mazeTree.length-1;
+            }
+          } else if (dir == 'L') {
+            col = mazeTree[currentCell].col;  //
+            row = mazeTree[currentCell].row;  //
+            //console.log("Testing L from: (" + col + "," + row + ")");
+            mazeTree[currentCell].digs += 1;
+            let digCol = col-1;
+            let digRow = row;  
+            if (digCol >= 0 && cellStatus[digCol][digRow] == UNVISITED) {
+              removeLeftWall(col, row);
+              //console.log("Digging L to: (" + digCol + "," + digRow + ")");
+              mazeTree.push({'col': digCol, 'row': digRow, 'parent': currentCell, 'digs': 0, 'digOrder': getDigOrder(col, row), 'depth': depth+1});
+              cellStatus[digCol][digRow] = VISITED;
+              numCellsDug += 1;
+              currentCell = mazeTree.length-1;
+            }
+          } else if (dir == 'R') {
+            col = mazeTree[currentCell].col;  //
+            row = mazeTree[currentCell].row;  //
+            //console.log("Testing R from: (" + col + "," + row + ")");
+            mazeTree[currentCell].digs += 1;
+            let digCol = col+1;
+            let digRow = row;
+            if (digCol < MAZE_COLS && cellStatus[digCol][digRow] == UNVISITED) {
+              removeRightWall(col, row);
+              //console.log("Digging R to: (" + digCol + "," + digRow + ")");
+              mazeTree.push({'col': digCol, 'row': digRow, 'parent': currentCell, 'digs': 0, 'digOrder': getDigOrder(col, row), 'depth': depth+1});
+              cellStatus[digCol][digRow] = VISITED;
+              numCellsDug += 1;
+              currentCell = mazeTree.length-1;
+            }
+          }
+          // this will only happen after trying all 4 directions from this cell
+          if (mazeTree[currentCell].digs == 4) {
+            col = mazeTree[currentCell].col;
+            row = mazeTree[currentCell].row;
+            //console.log("backtracking from: (" + col + "," + row + ")");
+            cellStatus[mazeTree[currentCell].col][mazeTree[currentCell].row] = DONE;
+            numCellsDone += 1;
+            if (mazeTree[currentCell].parent == -1) {
+              console.log("should be done!");
+            } else {
+              currentCell = mazeTree[currentCell].parent;
+              col = mazeTree[currentCell].col;
+              row = mazeTree[currentCell].row;
+              //console.log("  backtracked to: (" + col + "," + row + ")");
+              //printMazeTree();
+            }
+          }
+        }
+      }
+
+
+      // function getUrlParameter(sParam) {
+      //   var sPageUrl = window.location.search.substring(1);
+      //   var sUrlVariables = sPageUrl.split('&');
+      //   for (var i = 0; i < sUrlVariables.length; i++) {
+      //     var sParameterName = sUrlVariables[i].split('=');
+      //     if (sParameterName[0] == sParam) {
+      //         return sParameterName[1];
+      //     }
+      //   }
+      // }​
+
+
+      function removeTopWall(col, row) {
+        horizWalls[col][row] = 0;
+      }
+
+      function removeBottomWall(col, row) {
+        horizWalls[col][row+1] = 0;
+      }
+
+      function removeLeftWall(col, row) {
+        vertWalls[col][row] = 0;
+      }
+
+      function removeRightWall(col, row) {
+        vertWalls[col+1][row] = 0;
+      }
+
+      function makeMaze() {
+        removeTopWall(start[0], start[1]);
+        removeBottomWall(finish[0], finish[1]);
+        digMaze(start[0], start[1]);
+      }
+
+      function makeAndDraw() {
+        // let doAble = false;
+        // while (!doAble) {
+          // digVoids();
+          markBlocks(0, MAZE_ROWS/5, DONE);
+          markBlocks(0, MAZE_ROWS/6, UNVISITED);
+
+          removeWalls();
+          // if (testPath() == true) {
+            // doAble = true;
+        //   // } else {
+        //   //   refillVoids();
+        //   // }
+        // }
+        makeMaze();
+        drawMaze();
+        // drawSolution();
+      }
+
+      // create path for downward-pointing arrow
+      // centered at x,y  fits in box of size * size pixels
+      function downArrow(x, y, size) {
+        let u = Math.floor(size/6);  // "unit length"
+        // start at top left of arrow's "stem" work around clockwise
+        let pathString = 'M ' + x + ' ' + y;
+        pathString = pathString + ' m ' + (-2*u) + ' ' + (-3*u);
+        pathString = pathString + ' h ' + 4*u + ' v ' + 4*u + ' h ' + 2*u;
+        pathString = pathString + ' l ' + (-4*u) + ' ' + 4*u + ' l ' + (-4*u) + ' ' + (-4*u);
+        pathString = pathString + ' h ' + 2*u + ' Z';
+        return new Path2D(pathString);
+      }
+      
+      function drawMaze() {
+
+        var canvas = document.getElementById('mazeFrame');
+        var canvasWidth = canvas.width;
+        var canvasHeight = canvas.height;
+        if (canvas.getContext) {
+          var ctx = canvas.getContext('2d');
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          let startArrow = downArrow(LEFT_MARGIN + start[0] * TILE_SIZE + TILE_SIZE/2, (TILE_SIZE), TILE_SIZE);
+          ctx.fill(startArrow);
+          let finishArrow = downArrow(LEFT_MARGIN + finish[0] * TILE_SIZE + TILE_SIZE/2, TOP_MARGIN + (MAZE_ROWS+1) * TILE_SIZE, TILE_SIZE);
+          ctx.fill(finishArrow);
+          // draw walls, vert and horiz
+          for (var row = 0; row < MAZE_ROWS; row += 1) {
+            for (var col = 0; col < MAZE_COLS; col += 1) {
+              // set x,y to top left of cell [col][row]
+              var x = LEFT_MARGIN + col * TILE_SIZE;
+              var y = TOP_MARGIN + row * TILE_SIZE;
+              if (horizWalls[col][row]) {
+                ctx.beginPath();
+                ctx.strokeStyle = '#000000';
+                ctx.moveTo(x, y);
+                ctx.lineTo(x + TILE_SIZE, y);
+                ctx.stroke();
+              }
+              if (vertWalls[col][row]) {
+                ctx.beginPath();
+                ctx.strokeStyle = '#000000';
+                ctx.moveTo(x, y);
+                ctx.lineTo(x, y + TILE_SIZE);
+                ctx.stroke();
+              }
+              // if in last col, may need to draw extra vert at end of row
+              if (col == MAZE_COLS-1) {
+                if (vertWalls[col+1][row]) {
+                  ctx.beginPath();
+                  ctx.strokeStyle = '#000000';
+                  ctx.moveTo(x + TILE_SIZE, y);
+                  ctx.lineTo(x + TILE_SIZE, y + TILE_SIZE);
+                  ctx.stroke();
+                }
+              }
+              // if in last row, may need to draw extra horiz at bottom of column
+              if (row == MAZE_ROWS-1) {
+                if (horizWalls[col][row+1]) {
+                  ctx.beginPath();
+                  ctx.strokeStyle = '#000000';
+                  ctx.moveTo(x, y + TILE_SIZE);
+                  ctx.lineTo(x + TILE_SIZE, y + TILE_SIZE);
+                  ctx.stroke();
+                }
+              }
+            }
+          }
+        }
+      }
+
+      
+      function drawSolution() {
+
+        var canvas = document.getElementById('mazeFrame');
+        var canvasWidth = canvas.width;
+        var canvasHeight = canvas.height;
+        if (canvas.getContext) {
+          var ctx = canvas.getContext('2d');
+          // start at finish, work your way back
+          let iter = 0;
+          let backAtStart = false;
+          let currentCellIndex = finishIndex;
+          while(!backAtStart && iter < 10000000) {
+            iter += 1;
+            let previousCellIndex = mazeTree[currentCellIndex].parent; 
+            // set x,y to middle of current cell [col][row]
+            let curCol = mazeTree[currentCellIndex].col;
+            let curRow = mazeTree[currentCellIndex].row;
+            let prevCol = mazeTree[previousCellIndex].col;
+            let prevRow = mazeTree[previousCellIndex].row;
+            let curX = LEFT_MARGIN + curCol * TILE_SIZE + TILE_SIZE/2;
+            let curY = TOP_MARGIN  + curRow * TILE_SIZE + TILE_SIZE/2;
+            let prevX = LEFT_MARGIN + prevCol * TILE_SIZE + TILE_SIZE/2;
+            let prevY = TOP_MARGIN  + prevRow * TILE_SIZE + TILE_SIZE/2;
+            // console.log('drawing from ', curCol, curRow, 'to' , prevCol, prevRow);
+            ctx.beginPath();
+            ctx.strokeStyle = '#FF0000';
+            ctx.moveTo(curX, curY);
+            ctx.lineTo(prevX, prevY);
+            ctx.stroke();
+            if (mazeTree[previousCellIndex].col == start[0] && mazeTree[previousCellIndex].row == start[1]) {
+              backAtStart = true;
+              console.log('hit start at index' , previousCellIndex);
+            }
+            currentCellIndex = previousCellIndex;
+          }
+        }
+      }
+
+      // low-budget 'random' generator
+      // found this on Stack Overflow
+      // could cycle
+      function cheesyRandom() {
+          randomSeed = Math.sin(randomSeed) * 1000000;
+          return randomSeed - Math.floor(randomSeed);
+      }
+      // integer between lo, hi, inclusive
+      function randomBetween(lo, hi) {
+        return Math.floor(lo + cheesyRandom()*(1+hi-lo));
+      }
+
+      function doink() {
+          var sound = document.getElementById("doink");
+          sound.play();
+      }
+
+      function jump() {
+          var sound = document.getElementById("jump");
+          sound.play();
+      }
+
+      function tada() {
+        var sound = document.getElementById("tada");
+        sound.play();
+      }
+
+      // keep track of user navigation through maze
+      let navCol = start[0];
+      let navRow = start[1];
+
+      function testMoveUp(navCol, navRow) {
+        if (navRow == 0) {
+          return false;
+        } else if (horizWalls[navCol][navRow]) {
+          return false;
+        } else {
+          return true;
+        }
+      }
+      function testMoveDown(navCol, navRow) {
+        if (navRow == MAZE_ROWS) {
+          return false;
+        } else if (horizWalls[navCol][navRow+1]) {
+          return false;
+        } else {
+          return true;
+        }
+      }
+      function testMoveLeft(navCol, navRow) {
+        if (navCol == 0) {
+          return false;
+        } else if (vertWalls[navCol][navRow]) {
+          return false;
+        } else {
+          return true;
+        }
+      }
+      function testMoveRight(navCol, navRow) {
+        if (navCol == MAZE_COLS) {
+          return false;
+        } else if (vertWalls[navCol+1][navRow]) {
+          return false;
+        } else {
+          return true;
+        }
+      }
+
+      function testFinish(col, row) {
+        return (col == finish[0] && row == finish[1]);
+      }
+
+      function colToX(col) {
+        return LEFT_MARGIN + col*TILE_SIZE + TILE_SIZE/2;
+      }
+      function rowToY(row) {
+        return TOP_MARGIN + row*TILE_SIZE + TILE_SIZE/2;
+      }
+
+      function drawPathSegment(col1, row1, col2, row2, color) {
+        let canvas = document.getElementById('mazeFrame');
+        let ctx = canvas.getContext('2d');
+        ctx.lineWidth = TILE_SIZE/2;
+        ctx.beginPath();
+        ctx.strokeStyle = color;
+        ctx.moveTo(colToX(col1), rowToY(row1));
+        ctx.lineTo(colToX(col2), rowToY(row2));
+        ctx.stroke();    
+      }
+
+
+      // screen interaction, etc
+      document.onkeydown = checkKey;
+
+      function checkKey(e) {
+        e = e || window.event;
+        if (e.keyCode == '38') {
+          console.log('up at ', navCol, navRow);
+          if(testMoveUp(navCol, navRow)) {
+            jump();
+            drawPathSegment(navCol, navRow, navCol, navRow-1, "#00FF33");
+            navRow -= 1;
+            if (testFinish(navCol, navRow)) {
+              tada();
+            }
+          } else {
+            doink();
+          }
+        }
+        else if (e.keyCode == '40') {
+          console.log('down at ', navCol, navRow);
+          if(testMoveDown(navCol, navRow)) {
+            jump();
+            drawPathSegment(navCol, navRow, navCol, navRow+1, "#00FF33");
+            navRow += 1;
+            if (testFinish(navCol, navRow)) {
+              tada();
+            }
+          } else {
+            doink();
+          }
+        }
+        else if (e.keyCode == '37') {
+          console.log('left at ', navCol, navRow);
+          if(testMoveLeft(navCol, navRow)) {
+            jump();
+            drawPathSegment(navCol, navRow, navCol-1, navRow, "#00FF33");
+            navCol -= 1;
+            if (testFinish(navCol, navRow)) {
+              tada();
+            }
+          } else {
+            doink();
+          }
+        }
+        else if (e.keyCode == '39') {
+          console.log('right at ', navCol, navRow);
+          if(testMoveRight(navCol, navRow)) {
+            jump();
+            drawPathSegment(navCol, navRow, navCol+1, navRow, "#00FF33");
+            navCol += 1;
+            if (testFinish(navCol, navRow)) {
+              tada();
+            }
+          } else {
+            doink();
+          }
+        }
+      }
+
+
+
+
+    </script>
+    <style type="text/css">
+      canvas { padding: 20px; }
+      #main {
+        background: #999;
+        padding: 10px;
+      }
+
+      .frame {
+        background: #ccc;
+        /*height: 200px;*/
+        margin: 20px;
+      }
+    </style>
+    <!-- sounds downloaded from here: https://www.soundjay.com/button-sounds-1.html -->
+    <audio id="doink" src="button-33a.mp3" autoplay="false" ></audio>
+    <audio id="jump" src="button-19.mp3" autoplay="false" ></audio>
+    <audio id="tada" src="dream-harp-06.mp3" autoplay="false" ></audio>
+
+
+  </head>
+
+
+  <!-- need to set canvas size based on #rows and cols -->
+  <body onload="makeAndDraw();">
+    <div id="main">
+      <div class="frame">
+        <div class="maze">
+          <canvas id="mazeFrame" width="800" height="500"></canvas>
+        </div>
+        <div class="controls">
+          controls could go here
+        </div>
+      </div> 
+    </div>
+  </body>
+</html>
